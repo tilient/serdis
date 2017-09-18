@@ -5,29 +5,55 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
 
 //---------------------------------------------------------
 
+const serdisPort = 56765
+
+//---------------------------------------------------------
+
 func main() {
-	senders()
-	listener()
-	cleanPeers()
+	self := makeNode()
+	self.broadcast()
+	self.listen()
+	self.run()
 }
 
 //---------------------------------------------------------
 
-const serdisPort = 56765
-
-var (
-	peers      map[string]int = make(map[string]int)
-	peersMutex sync.Mutex
+type (
+	Link struct {
+		ip net.IP
+	}
+	LinkList []*Link
+	Node     struct {
+		id         string
+		name       string
+		links      LinkList
+		peers      map[string]int
+		peersMutex sync.Mutex
+	}
+	NodeList []*Node
 )
 
-func senders() {
-	serdisMarker := []byte("serdis")
+func makeNode() *Node {
+	node := Node{
+		id:    "1234567890",
+		name:  "wiffel",
+		links: LinkList{},
+		peers: make(map[string]int),
+	}
+	return &node
+}
+
+//---------------------------------------------------------
+
+func (n *Node) broadcast() {
+	info := []byte("serdis\n" + n.id + "\n" + n.name + "\n")
 	for _, bip := range broadcastIPv4s() {
 		addr := &net.UDPAddr{
 			IP:   bip,
@@ -39,14 +65,14 @@ func senders() {
 		}
 		go func() {
 			for {
-				udpSocket.Write(serdisMarker)
+				udpSocket.Write(info)
 				time.Sleep(5 * time.Second)
 			}
 		}()
 	}
 }
 
-func listener() {
+func (n *Node) listen() {
 	socket, err := net.ListenUDP("udp4", &net.UDPAddr{
 		IP:   net.IPv4(0, 0, 0, 0),
 		Port: serdisPort,
@@ -57,27 +83,58 @@ func listener() {
 	go func() {
 		data := make([]byte, 256)
 		for {
-			_, addr, _ := socket.ReadFromUDP(data)
-			peersMutex.Lock()
-			peers[addr.IP.String()] = 60
-			peersMutex.Unlock()
+			nr, addr, _ := socket.ReadFromUDP(data)
+			//fmt.Printf("-recv-\n%s------\n", string(data[:nr]))
+			parts := strings.Split(string(data[:nr]), "\n")
+			//fmt.Printf("parts: %s\n", parts)
+			id := parts[1]
+			name := parts[2]
+			ip := addr.IP
+			n.peersMutex.Lock()
+			n.peers[ip.String()] = 60
+			n.peersMutex.Unlock()
+			n.receivedPing(id, name, ip)
 		}
 	}()
 }
 
-func cleanPeers() {
+func (lst LinkList) pingIP(pingIP net.IP) LinkList {
+	for _, link := range lst {
+		//fmt.Printf("== %s ?= %s ==\n", link.ip, pingIP)
+		if link.ip.Equal(pingIP) {
+			return lst
+		}
+	}
+	return append(lst, &Link{ip: pingIP})
+}
+
+func (n *Node) receivedPing(id, name string, ip net.IP) {
+	if id == n.id {
+		//fmt.Println("** received from myself **")
+		n.links = n.links.pingIP(ip)
+	} else {
+		fmt.Println("** received from PEER **")
+	}
+}
+
+func (n *Node) run() {
 	for {
 		fmt.Println("--Peers--")
-		peersMutex.Lock()
-		for k, v := range peers {
+		n.peersMutex.Lock()
+		for k, v := range n.peers {
 			fmt.Println(k, "->", v)
 			if v <= 0 {
-				delete(peers, k)
+				delete(n.peers, k)
 			} else {
-				peers[k] = v - 10
+				n.peers[k] = v - 10
 			}
 		}
-		peersMutex.Unlock()
+		n.peersMutex.Unlock()
+		fmt.Println("---------")
+		fmt.Printf("-- %s (%s) --\n", n.name, n.id)
+		for _, l := range n.links {
+			fmt.Printf("-- %s \n", l.ip)
+		}
 		fmt.Println("---------")
 		time.Sleep(10 * time.Second)
 	}
